@@ -1,0 +1,28 @@
+{
+  "issues": [
+    {
+      "id": "DEMO-1",
+      "identifier": "DEMO-1",
+      "title": "Add a greet() helper with tests",
+      "state": "Todo",
+      "labels": ["nezha"],
+      "description": "Create `greet.py` exposing `greet(name)` that returns `Hello, <name>!`.\nAdd `test_greet.py` covering the normal case and the empty-name case.\nEmpty or whitespace-only names must raise ValueError.\nVerify with `python3 -m pytest -q` (or unittest if pytest is unavailable)."
+    },
+    {
+      "id": "DEMO-2",
+      "identifier": "DEMO-2",
+      "title": "Already shipped",
+      "state": "Done",
+      "labels": [],
+      "description": "Terminal issue: used to exercise startup cleanup."
+    },
+    {
+      "id": "DEMO-3",
+      "identifier": "DEMO-3",
+      "title": "Not ready yet",
+      "state": "Backlog",
+      "labels": [],
+      "description": "Ineligible: 'Backlog' is neither active nor terminal."
+    }
+  ]
+}
