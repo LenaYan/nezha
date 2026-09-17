@@ -99,6 +99,10 @@ sandbox:
     - ~/Library/Keychains
   allow_write: []
   readonly_paths: []
+  # Linux needs far more than bwrap (slirp4netns, iptables, /dev/net/tun...).
+  # doctor checks the documented list; set this true if the check is wrong
+  # for your host -- but a host that cannot sandbox fails every command.
+  skip_host_prereq_check: false
   image: nezha-agent:latest
 ---
 

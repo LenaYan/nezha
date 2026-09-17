@@ -313,3 +313,55 @@ def test_native_preflight_rejects_missing_auth(tmp_path):
     (tmp_path / "empty-home").mkdir()
     with pytest.raises(SandboxError, match="data.db"):
         sb.preflight()
+
+
+# -- host prerequisite checking ---------------------------------------------
+#
+# Copilot's own probe checks bwrap and nothing else, and its docs say so. A
+# Linux host can pass that probe and still fail every command. These tests pin
+# the fuller check; they run on any host because host_backend is faked.
+
+def test_native_host_problems_reports_all_missing_at_once(tmp_path, monkeypatch):
+    sb = _native(tmp_path)
+    monkeypatch.setattr(sb, "host_backend", lambda: "bubblewrap")
+    monkeypatch.setattr("nezha.sandbox.shutil.which", lambda name: None)
+    monkeypatch.setattr("nezha.sandbox.os.access", lambda path, mode: False)
+    problems = sb.host_problems()
+    joined = " ".join(problems)
+    for needed in ("bwrap", "slirp4netns", "unshare", "nsenter",
+                   "iptables", "ip6tables", "/dev/net/tun"):
+        assert needed in joined, "%s not reported" % needed
+    assert len(problems) > 5, "an operator wants one list, not one item per run"
+
+
+def test_native_host_problems_quiet_when_linux_host_is_complete(tmp_path, monkeypatch):
+    sb = _native(tmp_path)
+    monkeypatch.setattr(sb, "host_backend", lambda: "bubblewrap")
+    monkeypatch.setattr("nezha.sandbox.shutil.which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr("nezha.sandbox.os.access", lambda path, mode: True)
+    monkeypatch.setattr(sb, "_version_at_least",
+                        lambda label, argv, minimum: True)
+    assert sb.host_problems() == []
+
+
+def test_native_preflight_explains_the_silent_failure_mode(tmp_path, monkeypatch):
+    sb = _native(tmp_path)
+    monkeypatch.setattr(sb, "host_backend", lambda: "bubblewrap")
+    monkeypatch.setattr("nezha.sandbox.shutil.which", lambda name: None)
+    monkeypatch.setattr("nezha.sandbox.os.access", lambda path, mode: False)
+    with pytest.raises(SandboxError, match="slirp4netns"):
+        sb.preflight()
+
+
+def test_native_host_prereq_check_can_be_skipped(tmp_path, monkeypatch):
+    """The list is transcribed from docs and untested on Linux; leave an exit."""
+    sb = _native(tmp_path, skip_host_prereq_check=True)
+    monkeypatch.setattr(sb, "host_backend", lambda: "bubblewrap")
+    monkeypatch.setattr("nezha.sandbox.shutil.which", lambda name: None)
+    assert sb.host_problems() == []
+
+
+def test_native_unparseable_version_is_not_treated_as_too_old(tmp_path):
+    sb = _native(tmp_path)
+    assert sb._version_at_least("x", ["true"], (99, 0)) is True
+    assert sb._version_at_least("x", ["no-such-binary-xyz"], (0, 1)) is True

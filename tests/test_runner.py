@@ -242,3 +242,47 @@ def test_stderr_on_failure_is_reported(tmp_path):
     result = cop.run("p", str(tmp_path), str(tmp_path / "run"))
     assert not result.ok
     assert "real failure" in result.error
+
+
+# -- sandbox notices ---------------------------------------------------------
+#
+# Copilot reports "this host cannot sandbox" as an ephemeral warning, and then
+# every command fails. parse_events drops ephemeral events, which is right for
+# render deltas and was wrong for this one.
+
+def test_sandbox_warning_survives_the_ephemeral_filter():
+    lines = [
+        json.dumps({"type": "log", "ephemeral": True,
+                    "data": {"level": "warning", "type": "sandbox",
+                             "message": "Sandboxing is enabled but unsupported here"}}),
+        json.dumps({"type": "result", "exitCode": 0}),
+    ]
+    result = parse_events(lines)
+    assert result.sandbox_notices == ["Sandboxing is enabled but unsupported here"]
+    assert "sandbox_notices" in result.summary()
+
+
+def test_ordinary_ephemeral_noise_is_still_dropped():
+    lines = [
+        json.dumps({"type": "assistant.message_delta", "ephemeral": True,
+                    "data": {"deltaContent": "hello"}}),
+        json.dumps({"type": "log", "ephemeral": True,
+                    "data": {"level": "info", "message": "sandbox ready"}}),
+        json.dumps({"type": "result", "exitCode": 0}),
+    ]
+    result = parse_events(lines)
+    assert result.sandbox_notices == []
+    assert "sandbox_notices" not in result.summary()
+
+
+def test_sandbox_notices_are_deduped_and_capped():
+    lines = [json.dumps({"type": "log", "ephemeral": True,
+                         "data": {"level": "warning",
+                                  "message": "sandbox broke"}})] * 20
+    lines += [json.dumps({"type": "log", "ephemeral": True,
+                          "data": {"level": "error",
+                                   "message": "sandbox issue %d" % i}})
+              for i in range(20)]
+    result = parse_events(lines)
+    assert result.sandbox_notices.count("sandbox broke") == 1
+    assert len(result.sandbox_notices) <= 5

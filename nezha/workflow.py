@@ -153,7 +153,8 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
                 "docker_args": [], "allow_local_network": False, "allow_bypass": False,
                 "allow_dev_tool_access": True, "sandbox_mcp_servers": True,
                 "sandbox_lsp_servers": True, "keychain_access": False,
-                "auth_git": True, "auth_gh": False, "copilot_home_links": []},
+                "auth_git": True, "auth_gh": False, "copilot_home_links": [],
+                "skip_host_prereq_check": False},
 }
 
 _REQUIRED_STATE_KEYS = ("active_states", "terminal_states")

@@ -61,6 +61,10 @@ def cmd_doctor(args) -> int:
                 "sandbox.backend is 'none': the agent runs with your full user "
                 "privileges. Acceptable only if you review every diff.")
         if sandbox.name == "copilot-native":
+            if sandbox.skip_host_prereq_check:
+                notes.append(
+                    "sandbox.host     prerequisite check SKIPPED by config. If the "
+                    "host cannot sandbox, every command fails silently.")
             if sandbox.allow_bypass:
                 problems.append(
                     "sandbox.allow_bypass is true: a sandboxed command can opt out "

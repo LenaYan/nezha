@@ -192,6 +192,17 @@ every retry into a fresh conversation.
    `max_concurrent_agents > 1` under this backend was not tested for SQLite
    contention.
 
+**On Linux, a passing probe is not enough.** Copilot's own host check tests for
+`bwrap` and says outright that it does not check the namespace prerequisites.
+But every Linux sandbox runs in a private network namespace, so a host missing
+`slirp4netns`, `iptables`/`ip6tables` (and their `-restore` binaries),
+util-linux 2.35+ or `/dev/net/tun` passes the probe and then fails *every*
+command. Copilot reports that as an ephemeral startup warning, which a `-p` run
+never shows you — so the symptom is an agent that inexplicably accomplishes
+nothing. `doctor` checks the full documented list and reports all of it at once.
+Nezha also rescues sandbox warnings out of the ephemeral event stream into
+`sandbox_notices` on the run summary.
+
 ### `sandbox-exec` (legacy, macOS)
 
 Nezha's original hand-rolled Apple Seatbelt profile. Kept for hosts whose CLI
@@ -264,7 +275,7 @@ support `${VAR}` and `${VAR:-default}`.
 | `hooks` | `after_create`, `before_remove` (bash, run in the worktree) |
 | `agent` | `max_concurrent_agents`, `max_attempts`, `retry_backoff_ms`, `timeout_sec` |
 | `copilot` | `model`, `reasoning_effort`, `allow_all_tools`, `allow_all_paths`, `add_dir`, `deny_tool`, `available_tools`, `secret_env_vars`, `additional_mcp_config`, `extra_args` |
-| `sandbox` | `backend`, `allow_network`, `allow_local_network`, `allow_bypass`, `allow_dev_tool_access`, `sandbox_mcp_servers`, `sandbox_lsp_servers`, `keychain_access`, `auth_git`, `auth_gh`, `deny_read`, `allow_write`, `readonly_paths`, `image` |
+| `sandbox` | `backend`, `allow_network`, `allow_local_network`, `allow_bypass`, `allow_dev_tool_access`, `sandbox_mcp_servers`, `sandbox_lsp_servers`, `keychain_access`, `auth_git`, `auth_gh`, `deny_read`, `allow_write`, `readonly_paths`, `skip_host_prereq_check`, `image` |
 
 The body is the prompt template. Supported syntax is a **small Liquid subset**:
 `{{ dotted.path }}` and `{% if path %}` / `{% else %}` / `{% endif %}` (nesting
@@ -394,6 +405,7 @@ daemon.
 | Env vars are inherited into sandboxed commands | name every secret in `copilot.secret_env_vars` |
 | No egress control under `sandbox-exec` / `docker` | an agent can exfiltrate over HTTPS; use `copilot-native` with `allow_network: false` |
 | Concurrent agents share one auth database | **UNVERIFIED** under `max_concurrent_agents > 1` |
+| Linux host prerequisites are checked but **UNVERIFIED** | the list is transcribed from the CLI docs and was never run on Linux; `sandbox.skip_host_prereq_check` exists if it is wrong for your machine |
 | Sandboxing MCP servers breaks ones that live outside the worktree | a server whose venv or binary is elsewhere fails to start; name its path in `sandbox.readonly_paths`, or set `sandbox_mcp_servers: false` and accept that it runs unconfined |
 | The per-issue home symlinks your real `mcp-config.json` | the agent inherits every MCP server you use interactively; use `copilot.additional_mcp_config` if you want a narrower set |
 | Docker backend untested | may need argv fixes on first real use |

@@ -22,11 +22,14 @@ from typing import Any, Dict, List, Optional
 
 from .sandbox import Sandbox, strip_secrets
 
+#: Cap on rescued sandbox warnings; they repeat, and a run summary is not a log.
+_MAX_SANDBOX_NOTICES = 5
+
 
 class RunResult(object):
     __slots__ = ("exit_code", "session_id", "turns", "tool_calls", "tool_failures",
                  "final_message", "usage", "duration_sec", "timed_out", "log_path",
-                 "files_modified", "error")
+                 "files_modified", "error", "sandbox_notices")
 
     def __init__(self):
         self.exit_code = None            # type: Optional[int]
@@ -41,13 +44,14 @@ class RunResult(object):
         self.log_path = None             # type: Optional[str]
         self.files_modified = []         # type: List[str]
         self.error = None                # type: Optional[str]
+        self.sandbox_notices = []        # type: List[str]
 
     @property
     def ok(self) -> bool:
         return self.exit_code == 0 and not self.timed_out
 
     def summary(self) -> Dict[str, Any]:
-        return {
+        summary = {
             "exit_code": self.exit_code,
             "session_id": self.session_id,
             "turns": self.turns,
@@ -58,6 +62,40 @@ class RunResult(object):
             "premium_requests": (self.usage or {}).get("premiumRequests"),
             "files_modified": self.files_modified,
         }
+        if self.sandbox_notices:
+            summary["sandbox_notices"] = list(self.sandbox_notices)
+        return summary
+
+
+def _collect_sandbox_notice(event: Dict[str, Any], result: RunResult) -> None:
+    """Rescue sandbox warnings from the ephemeral event stream.
+
+    Copilot reports "this host cannot run the sandbox" through a warning tagged
+    ``ephemeral``, and every sandboxed command then fails. Dropping ephemeral
+    events wholesale -- which is otherwise correct, they are render-time deltas --
+    threw away the one message explaining why a run got nothing done.
+
+    The exact wire shape of that notice is *unverified*: it could not be observed
+    on a host where sandboxing works. So this matches on content rather than on a
+    shape, which costs a little precision and buys not being wrong about a
+    structure nobody here has seen.
+    """
+    if len(result.sandbox_notices) >= _MAX_SANDBOX_NOTICES:
+        return
+    data = event.get("data")
+    payload = data if isinstance(data, dict) else event
+    level = str(payload.get("level") or event.get("level") or "").lower()
+    if level not in ("warning", "error"):
+        return
+    message = payload.get("message") or payload.get("content") or ""
+    if not isinstance(message, str):
+        return
+    category = str(payload.get("type") or "")
+    if "sandbox" not in message.lower() and category != "sandbox":
+        return
+    message = message.strip()
+    if message and message not in result.sandbox_notices:
+        result.sandbox_notices.append(message)
 
 
 def parse_events(lines, result: Optional[RunResult] = None) -> RunResult:
@@ -82,6 +120,7 @@ def parse_events(lines, result: Optional[RunResult] = None) -> RunResult:
             result.files_modified = list(changes.get("filesModified") or [])
             continue
         if event.get("ephemeral"):
+            _collect_sandbox_notice(event, result)
             continue
         data = event.get("data") or {}
         if etype == "assistant.turn_end":

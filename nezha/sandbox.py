@@ -317,7 +317,12 @@ class CopilotNativeSandbox(Sandbox):
                                or DEFAULT_COPILOT_HOME_LINKS)
         self.source_home = os.path.abspath(os.path.expanduser(
             config.get("copilot_home") or os.environ.get("COPILOT_HOME") or "~/.copilot"))
+        # The prerequisite list below is transcribed from the CLI's own docs and
+        # could not be tested on a Linux host. Set this to skip it if it is wrong
+        # for your machine -- but read host_problems() before you do.
+        self.skip_host_prereq_check = bool(config.get("skip_host_prereq_check", False))
         self._probed = None  # type: Optional[str]
+        self._host_problems = None  # type: Optional[List[str]]
 
     # -- host + CLI capability -------------------------------------------
     def host_backend(self) -> str:
@@ -358,11 +363,16 @@ class CopilotNativeSandbox(Sandbox):
             raise SandboxError(
                 "Copilot command sandboxing supports macOS, Linux and Windows only; "
                 "this host is %r." % sys.platform)
-        if host == "seatbelt" and not os.path.exists("/usr/bin/sandbox-exec"):
-            raise SandboxError("sandbox-exec missing; the macOS Seatbelt backend needs it.")
-        if host == "bubblewrap" and shutil.which("bwrap") is None:
+        problems = self.host_problems()
+        if problems:
             raise SandboxError(
-                "bwrap (bubblewrap 0.5.0+) not found on PATH; the Linux backend needs it.")
+                "this host cannot run Copilot's command sandbox:\n  - %s\n"
+                "Every sandboxed command would fail, and Copilot only reports that "
+                "as an ephemeral startup notice that a -p run never surfaces, so "
+                "the symptom would be an agent that inexplicably gets nothing done. "
+                "Install the missing prerequisites, pick a different sandbox.backend, "
+                "or set sandbox.skip_host_prereq_check: true if this check is wrong "
+                "for your machine." % "\n  - ".join(problems))
         self.probe()
         missing = [n for n in self.home_links
                    if not os.path.exists(os.path.join(self.source_home, n))]
@@ -372,6 +382,77 @@ class CopilotNativeSandbox(Sandbox):
                 "authentication. Run `copilot login`, or set "
                 "sandbox.copilot_home_links to match this CLI version."
                 % self.source_home)
+
+    def host_problems(self) -> List[str]:
+        """Every unmet host prerequisite, not just the first.
+
+        Copilot's own probe checks only ``sandbox-exec`` on macOS and ``bwrap`` on
+        Linux; its documentation states outright that it does not check the
+        namespace prerequisites. A host that passes that probe can still fail
+        every single command, so Nezha checks the full documented list here and
+        reports all of it at once -- an operator fixing this wants one list, not
+        one item per run.
+        """
+        if self._host_problems is not None:
+            return self._host_problems
+        problems = []  # type: List[str]
+        host = self.host_backend()
+        if self.skip_host_prereq_check:
+            self._host_problems = problems
+            return problems
+        if host == "seatbelt" and not os.path.exists("/usr/bin/sandbox-exec"):
+            problems.append("sandbox-exec is missing (macOS Seatbelt backend needs it)")
+        elif host == "bubblewrap":
+            problems.extend(self._linux_problems())
+        self._host_problems = problems
+        return problems
+
+    def _linux_problems(self) -> List[str]:
+        problems = []  # type: List[str]
+        if shutil.which("bwrap") is None:
+            problems.append("bwrap (bubblewrap 0.5.0+) not found on PATH")
+        elif not self._version_at_least("bwrap", ["bwrap", "--version"], (0, 5)):
+            problems.append("bwrap is older than 0.5.0")
+        # Every Linux sandbox runs in a private network namespace, which needs
+        # far more than bwrap alone.
+        for binary, why in (
+            ("slirp4netns", "user-mode networking for the private namespace"),
+            ("unshare", "creating the namespace"),
+            ("nsenter", "entering the namespace"),
+            ("iptables", "namespace network rules"),
+            ("ip6tables", "namespace network rules"),
+            ("iptables-restore", "namespace network rules"),
+            ("ip6tables-restore", "namespace network rules"),
+        ):
+            if shutil.which(binary) is None:
+                problems.append("%s not found on PATH (needed for %s)" % (binary, why))
+        if shutil.which("unshare") and not self._version_at_least(
+                "util-linux", ["unshare", "--version"], (2, 35)):
+            problems.append(
+                "util-linux is older than 2.35, so unshare lacks "
+                "--map-current-user/--keep-caps")
+        if not os.access("/dev/net/tun", os.R_OK | os.W_OK):
+            problems.append("/dev/net/tun is not readable and writable")
+        return problems
+
+    @staticmethod
+    def _version_at_least(label: str, argv: List[str], minimum) -> bool:
+        """True unless the tool reports a version we can parse and it is too old.
+
+        Unparseable output is treated as new enough: a version string we do not
+        recognise is a weaker signal than a prerequisite we know is absent, and
+        blocking every run over it would be worse than the risk it covers.
+        """
+        try:
+            proc = subprocess.run(argv, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            return True
+        text = (proc.stdout or b"").decode("utf-8", "replace")
+        match = re.search(r"(\d+)\.(\d+)", text)
+        if not match:
+            return True
+        return (int(match.group(1)), int(match.group(2))) >= minimum
 
     # -- policy -----------------------------------------------------------
     def policy(self) -> Dict[str, Any]:
