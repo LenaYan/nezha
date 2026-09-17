@@ -417,4 +417,4 @@ no code with it. Not affiliated with or endorsed by that project.
 
 ## License
 
-Apache-2.0.
+Apache-2.0 — see [LICENSE](LICENSE).
