@@ -87,7 +87,9 @@ def test_build_argv_full():
         model="gpt-5.5", reasoning_effort="high", allow_all_paths=True,
         add_dir=["/tmp/x"], deny_tool=["shell"], available_tools=["view", "edit"],
         secret_env_vars=["A", "B"], disable_builtin_mcps=True,
-        additional_mcp_config="@/tmp/mcp.json", max_autopilot_continues=3,
+        additional_mcp_config="@/tmp/mcp.json", max_ai_credits=25,
+        allow_url=["github.com"], deny_url=["evil.test"],
+        no_custom_instructions=True, disallow_temp_dir=True,
         extra_args=["--experimental"],
     ).build_argv("p", resume_session="sess-9")
     joined = " ".join(argv)
@@ -100,7 +102,12 @@ def test_build_argv_full():
     assert "--secret-env-vars A,B" in joined
     assert "--disable-builtin-mcps" in joined
     assert "--additional-mcp-config @/tmp/mcp.json" in joined
-    assert "--max-autopilot-continues 3" in joined
+    assert "--max-autopilot-continues" not in joined
+    assert "--max-ai-credits 25" in joined
+    assert "--allow-url github.com" in joined
+    assert "--deny-url evil.test" in joined
+    assert "--no-custom-instructions" in joined
+    assert "--disallow-temp-dir" in joined
     assert "--resume sess-9" in joined
     assert joined.endswith("--experimental")
 
@@ -286,3 +293,20 @@ def test_sandbox_notices_are_deduped_and_capped():
     result = parse_events(lines)
     assert result.sandbox_notices.count("sandbox broke") == 1
     assert len(result.sandbox_notices) <= 5
+
+
+def test_unattended_defaults_are_on():
+    """A -p run has nobody to answer ask_user, and must not silently swap the
+    binary that doctor probed for a freshly downloaded one."""
+    joined = " ".join(runner().build_argv("p"))
+    assert "--no-ask-user" in joined
+    assert "--no-auto-update" in joined
+    # These two change repo behaviour, so they stay opt-in.
+    assert "--no-custom-instructions" not in joined
+    assert "--disallow-temp-dir" not in joined
+
+
+def test_unattended_defaults_can_be_turned_off():
+    joined = " ".join(runner(no_ask_user=False, no_auto_update=False).build_argv("p"))
+    assert "--no-ask-user" not in joined
+    assert "--no-auto-update" not in joined

@@ -65,22 +65,38 @@ copilot:
   add_dir: []
   deny_tool: []
   # Values of these variables are stripped from the child env and redacted.
+  # The sandbox inherits the rest of your shell environment, so a credential
+  # that lives in a variable is NOT covered by sandbox.deny_read. Name it here.
   secret_env_vars:
     - GITHUB_TOKEN
     - JIRA_API_TOKEN
+  # A -p run has nobody to answer a question, and nobody to notice a bill.
+  no_ask_user: true
+  max_ai_credits: null
+  # Pin the binary doctor actually checked: sandbox support and the
+  # COPILOT_HOME layout are both version-dependent.
+  no_auto_update: true
+  no_custom_instructions: false
+  disallow_temp_dir: false
+  allow_url: []
+  deny_url: []
   disable_builtin_mcps: false
   additional_mcp_config: null
   extra_args: []
 
 sandbox:
-  # copilot-native (default) | sandbox-exec (legacy, macOS) | docker | none
+  # copilot-native (default) | none
   backend: ${NEZHA_SANDBOX:-copilot-native}
   # Safe to set false under copilot-native: the CLI stays outside the sandbox,
   # so denying egress stops shell commands without cutting Copilot off its API.
   allow_network: true
   allow_local_network: false
   allow_bypass: false
+  # Also grants read access to ~/.npmrc, ~/.m2/settings.xml and friends,
+  # including any registry tokens they hold. Do not also deny_read those paths:
+  # the two settings contradict each other and `nezha doctor` will say so.
   allow_dev_tool_access: true
+  clear_policy_on_exit: true
   sandbox_mcp_servers: true
   sandbox_lsp_servers: true
   keychain_access: false
@@ -92,7 +108,6 @@ sandbox:
     - ~/.gnupg
     - ~/.kube
     - ~/.netrc
-    - ~/.npmrc
     - ~/.git-credentials
     - ~/.config/gh
     - ~/.config/gcloud
@@ -103,7 +118,6 @@ sandbox:
   # doctor checks the documented list; set this true if the check is wrong
   # for your host -- but a host that cannot sandbox fails every command.
   skip_host_prereq_check: false
-  image: nezha-agent:latest
 ---
 
 You are working on ticket `{{ issue.identifier }}` in an isolated git worktree.

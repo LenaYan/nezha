@@ -147,10 +147,13 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
                 "allow_all_tools": True, "allow_all_paths": False, "add_dir": [],
                 "deny_tool": [], "available_tools": [], "secret_env_vars": [],
                 "additional_mcp_config": None, "disable_builtin_mcps": False,
-                "max_autopilot_continues": None, "extra_args": []},
+                "allow_url": [], "deny_url": [], "max_ai_credits": None,
+                "no_ask_user": True, "no_auto_update": True,
+                "no_custom_instructions": False, "disallow_temp_dir": False,
+                "extra_args": []},
     "sandbox": {"backend": "copilot-native", "allow_network": True, "deny_read": [],
-                "allow_write": [], "readonly_paths": [], "image": "nezha-agent:latest",
-                "docker_args": [], "allow_local_network": False, "allow_bypass": False,
+                "allow_write": [], "readonly_paths": [], "allow_local_network": False,
+                "allow_bypass": False, "clear_policy_on_exit": True,
                 "allow_dev_tool_access": True, "sandbox_mcp_servers": True,
                 "sandbox_lsp_servers": True, "keychain_access": False,
                 "auth_git": True, "auth_gh": False, "copilot_home_links": [],
@@ -279,18 +282,21 @@ class Workflow(object):
         if float(self.polling["interval_ms"]) <= 0:
             raise WorkflowError("%s: polling.interval_ms must be > 0" % src)
         backend = self.sandbox["backend"]
-        if backend not in ("copilot-native", "sandbox-exec", "docker", "none"):
+        if backend not in ("copilot-native", "none"):
             raise WorkflowError(
-                "%s: sandbox.backend must be one of "
-                "copilot-native|sandbox-exec|docker|none, got %r" % (src, backend)
+                "%s: sandbox.backend must be one of copilot-native|none, got %r. "
+                "The sandbox-exec and docker backends were removed; see the "
+                "nezha.sandbox module docstring for why." % (src, backend)
             )
-        if backend != "copilot-native" and not self.sandbox.get("allow_network", True):
+        if backend == "none" and not self.sandbox.get("allow_network", True):
             raise WorkflowError(
-                "%s: sandbox.allow_network: false is only supported by the "
-                "copilot-native backend. Under %r the whole CLI sits inside the "
-                "sandbox, so denying egress also cuts Copilot off from its own "
-                "API and every run fails." % (src, backend)
+                "%s: sandbox.allow_network: false has no effect under backend "
+                "'none' -- there is no sandbox to enforce it. Either use "
+                "copilot-native or drop the setting." % src
             )
+        credits = self.copilot.get("max_ai_credits")
+        if credits is not None and float(credits) <= 0:
+            raise WorkflowError("%s: copilot.max_ai_credits must be > 0" % src)
         if not self.prompt_template.strip():
             raise WorkflowError("%s: prompt body is empty" % src)
         # Fail fast on template syntax rather than at dispatch time.

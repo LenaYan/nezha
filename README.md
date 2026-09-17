@@ -110,7 +110,7 @@ Module map:
 | `nezha/workflow.py` | `WORKFLOW.md` loader: YAML front matter, env indirection, template |
 | `nezha/tracker/` | read-only adapters (`file`, `jira`) over a normalized `Issue` |
 | `nezha/workspace.py` | worktree lifecycle, hooks, path safety, state files |
-| `nezha/sandbox.py` | `copilot-native` / `sandbox-exec` / `docker` / `none` backends |
+| `nezha/sandbox.py` | `copilot-native` / `none` backends |
 | `nezha/runner.py` | argv construction, process supervision, JSONL folding |
 | `nezha/orchestrator.py` | poll, dispatch, retry, reconcile, cancel |
 | `nezha/cli.py` | operator commands |
@@ -148,7 +148,7 @@ current shape.
 
 ## Security posture
 
-`sandbox.backend` selects one of four levels. **Pick deliberately.**
+`sandbox.backend` selects one of two levels. **Pick deliberately.**
 
 ### `copilot-native` (default)
 
@@ -164,8 +164,7 @@ Why this is the default:
 - **egress can actually be denied.** Copilot CLI is not itself sandboxed; it
   sandboxes each command it spawns. `allow_network: false` therefore stops
   `curl` at DNS resolution while the agent keeps reaching its own API. This was
-  verified empirically, and it is the single biggest gain over `sandbox-exec`,
-  where the same setting kills the agent outright;
+  verified empirically;
 - it is maintained by the vendor of the binary Nezha drives.
 
 The policy lives at `<state_root>/copilot-home/<issue>/settings.json` — outside
@@ -203,48 +202,25 @@ nothing. `doctor` checks the full documented list and reports all of it at once.
 Nezha also rescues sandbox warnings out of the ephemeral event stream into
 `sandbox_notices` on the run summary.
 
-### `sandbox-exec` (legacy, macOS)
+### Removed backends
 
-Nezha's original hand-rolled Apple Seatbelt profile. Kept for hosts whose CLI
-predates the native sandbox. The generated profile:
+Nezha used to ship `sandbox-exec` and `docker`. Both are gone, and the reasons
+are recorded here so they are not re-added by reflex:
 
-- denies **all** writes, then re-allows the worktree, the parent repo's git
-  common dir, the system temp dir, `~/.copilot`, `~/.cache` and Nezha's state dir;
-- denies **reads** of `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.netrc`,
-  `~/.npmrc`, `~/.git-credentials`, `~/.config/gh`, `~/.config/gcloud` and
-  `~/Library/Keychains`;
-- leaves network open.
+- **`sandbox-exec`** was a hand-rolled Seatbelt profile: `(allow default)` plus
+  deny rules, i.e. a **deny-list**, so any credential store nobody thought to
+  name stayed readable. It also had no usable egress control, because the profile
+  wrapped the CLI itself and the CLI needs the network to reach its own API.
+  `copilot-native` is an allow-list and confines only spawned commands, so it is
+  strictly stronger on both counts. Seatbelt does not nest, so the two could
+  never have been combined for defence in depth anyway.
+- **`docker`** was never verified against a running daemon, and it mounted the
+  real `~/.copilot` — including the `data.db` holding authentication —
+  read-write into a container running as root. It promised more isolation than
+  it delivered.
 
-Verified by `tests/test_sandbox.py`, which asserts real kernel enforcement:
-writes outside the worktree fail, secret reads fail, and `git commit` inside the
-worktree still works.
-
-**Limitations you are accepting:**
-
-1. `sandbox-exec` is formally deprecated by Apple. It still works; it may not forever.
-2. The profile is `(allow default)` + deny rules, i.e. a **deny-list**. An
-   unlisted secret store is readable. Audit `sandbox.deny_read` for your machine.
-3. **No egress control.** Here the CLI itself is inside the sandbox, so
-   `allow_network: false` breaks the agent outright. Nezha rejects that
-   combination at load time. An agent that exfiltrates over HTTPS is not stopped.
-4. `~/.gitconfig` is deliberately readable — git refuses to run without it. If
-   yours names a credential helper, that helper is reachable.
-5. A worktree shares the parent repo's object store, and the profile must grant
-   write access to it. **A hostile agent can corrupt the parent repository.** Use
-   a dedicated clone as `workspace.repo` for untrusted work.
-
-> **Seatbelt does not nest.** `copilot-native` cannot be stacked inside
-> `sandbox-exec`: `sandbox_init` rejects a profile applied within another one and
-> *every* command fails. The two are mutually exclusive — there is no defence in
-> depth to be had here, only a choice.
-
-### `docker`
-
-Separate filesystem, PID and network namespace — the only backend that confines
-the Copilot process itself rather than the commands it spawns. **UNVERIFIED:**
-Docker was not installed on the development host, so this path has argv-shape
-tests only, no execution tests. You must build an image containing `copilot`
-plus your toolchain.
+`WORKFLOW.md` files naming either backend are rejected at load time with a
+pointer to this section.
 
 ### `none`
 
@@ -274,8 +250,8 @@ support `${VAR}` and `${VAR:-default}`.
 | `workspace` | `repo`, `root`, `state_root`, `base_ref`, `branch_prefix` |
 | `hooks` | `after_create`, `before_remove` (bash, run in the worktree) |
 | `agent` | `max_concurrent_agents`, `max_attempts`, `retry_backoff_ms`, `timeout_sec` |
-| `copilot` | `model`, `reasoning_effort`, `allow_all_tools`, `allow_all_paths`, `add_dir`, `deny_tool`, `available_tools`, `secret_env_vars`, `additional_mcp_config`, `extra_args` |
-| `sandbox` | `backend`, `allow_network`, `allow_local_network`, `allow_bypass`, `allow_dev_tool_access`, `sandbox_mcp_servers`, `sandbox_lsp_servers`, `keychain_access`, `auth_git`, `auth_gh`, `deny_read`, `allow_write`, `readonly_paths`, `skip_host_prereq_check`, `image` |
+| `copilot` | `model`, `reasoning_effort`, `allow_all_tools`, `allow_all_paths`, `add_dir`, `deny_tool`, `available_tools`, `secret_env_vars`, `additional_mcp_config`, `allow_url`, `deny_url`, `max_ai_credits`, `no_ask_user`, `no_auto_update`, `no_custom_instructions`, `disallow_temp_dir`, `extra_args` |
+| `sandbox` | `backend`, `allow_network`, `allow_local_network`, `allow_bypass`, `allow_dev_tool_access`, `sandbox_mcp_servers`, `sandbox_lsp_servers`, `keychain_access`, `auth_git`, `auth_gh`, `deny_read`, `allow_write`, `readonly_paths`, `clear_policy_on_exit`, `skip_host_prereq_check` |
 
 The body is the prompt template. Supported syntax is a **small Liquid subset**:
 `{{ dotted.path }}` and `{% if path %}` / `{% else %}` / `{% endif %}` (nesting
@@ -389,10 +365,10 @@ the observed node types pinned as tests. `doctor` reported
 `jira: 865 issues, 0 eligible` over 9 pages; `issues` and `prompt` rendered real
 tickets, links included.
 
-**Not verified:** the Docker backend (Docker not installed, marked `UNVERIFIED`
-in source), `auth: basic` against a live site (only `auth: bearer` was exercised
-live; Basic is covered by stubbed-transport tests), and a long-running `run`
-daemon.
+**Not verified:** `auth: basic` against a live site (only `auth: bearer` was
+exercised live; Basic is covered by stubbed-transport tests), a long-running
+`run` daemon, and which side wins when `deny_read` and `allowDevToolAccess`
+name the same path — `doctor` reports that contradiction rather than guessing.
 
 ---
 
@@ -402,13 +378,13 @@ daemon.
 |---|---|
 | Native sandbox is an experimental CLI feature | may change or vanish on a CLI upgrade; `doctor` fails loudly if it does |
 | Copilot's built-in file tools are not OS-confined | in-process best-effort only; keep `allow_all_paths: false` |
-| Env vars are inherited into sandboxed commands | name every secret in `copilot.secret_env_vars` |
-| No egress control under `sandbox-exec` / `docker` | an agent can exfiltrate over HTTPS; use `copilot-native` with `allow_network: false` |
+| Env vars are inherited into sandboxed commands | `sandbox.deny_read` covers files, not variables: a credential in `AWS_ACCESS_KEY_ID` is still visible. Name every secret in `copilot.secret_env_vars` |
+| `allow_dev_tool_access` grants dev-tool config back | `~/.npmrc`, `~/.m2/settings.xml` and friends are readable **including their registry tokens**; `doctor` fails if `deny_read` claims otherwise. Set `allow_dev_tool_access: false` and use `readonly_paths` to be explicit |
+| Repo instructions live inside the worktree | `AGENTS.md` and `.github/instructions/**` are writable by the agent and are re-read on `--resume`, so attempt 1 can change what attempt 2 obeys. `copilot.no_custom_instructions: true` closes this at the cost of the repo's own guidance |
 | Concurrent agents share one auth database | **UNVERIFIED** under `max_concurrent_agents > 1` |
 | Linux host prerequisites are checked but **UNVERIFIED** | the list is transcribed from the CLI docs and was never run on Linux; `sandbox.skip_host_prereq_check` exists if it is wrong for your machine |
 | Sandboxing MCP servers breaks ones that live outside the worktree | a server whose venv or binary is elsewhere fails to start; name its path in `sandbox.readonly_paths`, or set `sandbox_mcp_servers: false` and accept that it runs unconfined |
 | The per-issue home symlinks your real `mcp-config.json` | the agent inherits every MCP server you use interactively; use `copilot.additional_mcp_config` if you want a narrower set |
-| Docker backend untested | may need argv fixes on first real use |
 | Jira `auth: basic` unexercised live | may fail on first real call (401/proxy/SSO) |
 | Jira Server/DC unsupported | different API version, paging and markup |
 | Every tick pages the whole JQL result | a broad query costs seconds and many requests per poll |

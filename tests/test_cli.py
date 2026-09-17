@@ -149,3 +149,35 @@ def test_runtime_error_exits_one(capsys, tmp_path):
                    "  terminal_states: [Done]\n---\nbody", encoding="utf-8")
     assert main(["issues", "-w", str(bad)]) == 1
     assert "provider.path is required" in capsys.readouterr().err
+
+
+def _doctor_output(wf_file, capsys, extra):
+    text = wf_file.read_text(encoding="utf-8").replace("---\nWork on", extra + "---\nWork on")
+    wf_file.write_text(text, encoding="utf-8")
+    main(["doctor", "-w", str(wf_file)])
+    return capsys.readouterr().out
+
+
+def test_doctor_flags_a_self_contradicting_filesystem_policy(wf_file, capsys):
+    """deny_read says ~/.npmrc is unreadable; allowDevToolAccess grants it back."""
+    out = _doctor_output(wf_file, capsys, (
+        "sandbox:\n  backend: copilot-native\n  allow_dev_tool_access: true\n"
+        "  deny_read: [~/.npmrc]\n"))
+    assert "allow_dev_tool_access" in out
+    assert ".npmrc" in out
+
+
+def test_doctor_flags_auto_update_as_a_problem(wf_file, capsys):
+    out = _doctor_output(wf_file, capsys, "copilot:\n  no_auto_update: false\n")
+    assert "no_auto_update" in out
+    assert "version-dependent" in out
+
+
+def test_doctor_notes_an_unbounded_budget(wf_file, capsys):
+    out = _doctor_output(wf_file, capsys, "")
+    assert "unbounded" in out
+
+
+def test_doctor_is_quiet_about_budget_once_it_is_capped(wf_file, capsys):
+    out = _doctor_output(wf_file, capsys, "copilot:\n  max_ai_credits: 10\n")
+    assert "unbounded" not in out

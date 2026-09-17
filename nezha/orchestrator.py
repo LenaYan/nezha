@@ -171,19 +171,40 @@ class Orchestrator(object):
             self._pool.submit(self._execute, issue, state)
 
     def _startup_cleanup(self, issues: List[Issue]) -> None:
-        """Remove worktrees whose issue already reached a terminal state."""
+        """Drop the worktree *and* the sandbox home of already-terminal issues."""
         for issue in issues:
             if issue.state not in self.tracker.terminal_states:
                 continue
             ws = self.workspaces.describe(issue.id, issue.identifier)
-            if os.path.isdir(ws.path):
-                self.log.info("cleanup.terminal", identifier=issue.identifier,
-                              state=issue.state)
-                try:
+            home = self._sandbox_home(issue.id)
+            if not os.path.isdir(ws.path) and not (home and os.path.isdir(home)):
+                continue
+            self.log.info("cleanup.terminal", identifier=issue.identifier,
+                          state=issue.state)
+            try:
+                if os.path.isdir(ws.path):
                     self.workspaces.remove(ws)
-                except Exception as exc:  # noqa: BLE001
-                    self.log.warning("cleanup.failed", identifier=issue.identifier,
-                                     error=str(exc))
+                self._cleanup_sandbox_home(issue.id)
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning("cleanup.failed", identifier=issue.identifier,
+                                 error=str(exc))
+
+    def _sandbox_home(self, issue_id: str) -> Optional[str]:
+        getter = getattr(self.sandbox, "home_for", None)
+        return getter(issue_id) if getter is not None else None
+
+    def _cleanup_sandbox_home(self, issue_id: str) -> None:
+        """Remove the per-issue COPILOT_HOME.
+
+        It lives under the state root rather than in the worktree -- that is what
+        keeps the agent from editing its own sandbox policy -- so removing the
+        worktree does not remove it. Left behind, every ticket Nezha ever ran
+        leaks a directory holding a symlink to the real ``data.db``.
+        """
+        cleanup = getattr(self.sandbox, "cleanup_home", None)
+        if cleanup is None:
+            return
+        cleanup(issue_id)
 
     def _reconcile(self, by_id: Dict[str, Issue]) -> None:
         """Stop active runs whose issue left the active state set."""
@@ -208,6 +229,14 @@ class Orchestrator(object):
                           state=issue.state if issue else "?")
             with self._lock:
                 self.runs.pop(state.issue_id, None)
+            # _startup_cleanup only runs on the first tick, so for a daemon this
+            # is the path a ticket actually takes to terminal. Without it the
+            # sandbox home leaks for every ticket finished while the daemon ran.
+            try:
+                self._cleanup_sandbox_home(state.issue_id)
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning("cleanup.failed", identifier=state.identifier,
+                                 error=str(exc))
 
     def _cancel(self, state: RunState, reason: str) -> None:
         with self._lock:

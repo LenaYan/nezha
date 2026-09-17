@@ -241,3 +241,62 @@ def test_run_dir_holds_event_log(tmp_path, git_repo, board):
     assert attempts
     assert (attempts[0] / "events.jsonl").exists()
     assert (attempts[0] / "command.json").exists()
+
+
+# -- per-issue sandbox home cleanup ---------------------------------------
+
+class _HomeSpy(object):
+    """Stands in for copilot-native, whose COPILOT_HOME lives outside the worktree."""
+
+    name = "spy"
+
+    def __init__(self, root):
+        self.root = root
+        self.removed = []
+
+    def home_for(self, issue_id):
+        return os.path.join(self.root, issue_id)
+
+    def cleanup_home(self, issue_id):
+        self.removed.append(issue_id)
+
+    def preflight(self):
+        pass
+
+    def describe(self):
+        return "spy"
+
+    def wrap(self, argv, workdir, env, dry_run=False):
+        return list(argv), dict(env), None
+
+
+def test_terminal_issue_drops_its_sandbox_home_at_startup(tmp_path, git_repo, board):
+    orch, _ = make(tmp_path, git_repo, board, write_stub(tmp_path, "ok", OK_STUB))
+    spy = _HomeSpy(str(tmp_path / "homes"))
+    orch.sandbox = orch.runner.sandbox = spy
+    # T-2 is already Done, and a previous run left its home behind.
+    os.makedirs(spy.home_for("T-2"))
+    orch.run_once()
+    orch.shutdown()
+    assert "T-2" in spy.removed
+
+
+def test_home_is_dropped_when_an_issue_reaches_terminal_mid_run(tmp_path, git_repo, board):
+    """The daemon path: _startup_cleanup only fires once, _release_terminal is
+    what a ticket finished while the daemon was up actually goes through."""
+    orch, _ = make(tmp_path, git_repo, board, write_stub(tmp_path, "ok", OK_STUB))
+    spy = _HomeSpy(str(tmp_path / "homes"))
+    orch.sandbox = orch.runner.sandbox = spy
+    orch.run_once()
+    assert "T-1" not in spy.removed        # still Todo, home must survive for --resume
+    orch.tracker.set_state("T-1", "Done")
+    orch.tick()
+    orch.shutdown()
+    assert "T-1" in spy.removed
+
+
+def test_cleanup_is_skipped_for_backends_without_a_home(tmp_path, git_repo, board):
+    orch, _ = make(tmp_path, git_repo, board, write_stub(tmp_path, "ok", OK_STUB))
+    assert orch.sandbox.name == "none"
+    orch.run_once()          # must not raise on a backend with no cleanup_home
+    orch.shutdown()

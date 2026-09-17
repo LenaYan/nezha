@@ -160,12 +160,40 @@ class CopilotRunner(object):
             argv += ["--model", str(cfg["model"])]
         if cfg.get("reasoning_effort"):
             argv += ["--reasoning-effort", str(cfg["reasoning_effort"])]
-        if cfg.get("max_autopilot_continues") is not None:
-            argv += ["--max-autopilot-continues", str(cfg["max_autopilot_continues"])]
+        if cfg.get("max_ai_credits") is not None:
+            argv += ["--max-ai-credits", str(cfg["max_ai_credits"])]
+        # A -p run has nobody to answer ask_user. Without this the agent can
+        # burn the whole timeout window waiting on a question it will never
+        # get an answer to, and the attempt is scored as a timeout.
+        if cfg.get("no_ask_user", True):
+            argv.append("--no-ask-user")
+        # Copilot otherwise downloads and runs a newer build than the one
+        # doctor probed. The sandbox is experimental and COPILOT_HOME's layout
+        # is undocumented, so the binary that passed preflight must be the
+        # binary that runs.
+        if cfg.get("no_auto_update", True):
+            argv.append("--no-auto-update")
+        # AGENTS.md and .github/instructions/** live *inside* the worktree, so
+        # unlike the sandbox policy the agent can rewrite them and change how
+        # its own retry behaves. Off by default because most repos rely on them.
+        if cfg.get("no_custom_instructions"):
+            argv.append("--no-custom-instructions")
+        # The temp dir is granted by default and is the one writable surface
+        # two concurrent agents share.
+        if cfg.get("disallow_temp_dir"):
+            argv.append("--disallow-temp-dir")
         for directory in cfg.get("add_dir") or []:
             argv += ["--add-dir", os.path.expanduser(str(directory))]
         for tool in cfg.get("deny_tool") or []:
             argv += ["--deny-tool", str(tool)]
+        # URL permissions scope the CLI's own fetch tools; they are orthogonal
+        # to the OS sandbox's egress switch, which scopes spawned commands.
+        allow_url = cfg.get("allow_url") or []
+        if allow_url:
+            argv += ["--allow-url"] + [str(u) for u in allow_url]
+        deny_url = cfg.get("deny_url") or []
+        if deny_url:
+            argv += ["--deny-url"] + [str(u) for u in deny_url]
         available = cfg.get("available_tools") or []
         if available:
             argv += ["--available-tools"] + [str(t) for t in available]

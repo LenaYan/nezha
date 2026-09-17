@@ -124,3 +124,36 @@ def test_shipped_workflow_is_valid(repo_root):
     assert "ABC-1" in rendered
     assert "attempt #2" in rendered
     assert "{{" not in rendered and "{%" not in rendered
+
+
+def test_removed_backends_are_rejected_with_a_pointer():
+    for backend in ("sandbox-exec", "docker"):
+        text = MINIMAL.replace("---\nDo", "sandbox:\n  backend: %s\n---\nDo" % backend)
+        with pytest.raises(WorkflowError, match="were removed"):
+            Workflow.parse(text).validate()
+
+
+def test_deny_egress_under_backend_none_is_rejected():
+    text = MINIMAL.replace(
+        "---\nDo", "sandbox:\n  backend: none\n  allow_network: false\n---\nDo")
+    with pytest.raises(WorkflowError, match="no effect under backend"):
+        Workflow.parse(text).validate()
+
+
+def test_deny_egress_is_allowed_under_copilot_native():
+    text = MINIMAL.replace("---\nDo", "sandbox:\n  allow_network: false\n---\nDo")
+    Workflow.parse(text).validate()
+
+
+def test_non_positive_credit_ceiling_is_rejected():
+    text = MINIMAL.replace("---\nDo", "copilot:\n  max_ai_credits: 0\n---\nDo")
+    with pytest.raises(WorkflowError, match="max_ai_credits"):
+        Workflow.parse(text).validate()
+
+
+def test_unattended_copilot_defaults():
+    wf = Workflow.parse(MINIMAL)
+    assert wf.copilot["no_ask_user"] is True
+    assert wf.copilot["no_auto_update"] is True
+    assert wf.copilot["max_ai_credits"] is None
+    assert wf.sandbox["clear_policy_on_exit"] is True

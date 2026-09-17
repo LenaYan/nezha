@@ -1,42 +1,31 @@
 """Isolation backends -- the layer a git worktree does *not* give you.
 
-Four backends, weakest to strongest:
-
-``none``
-    No process isolation. The agent runs with your full user privileges and can
-    read ``~/.ssh``, reach any host, and touch any repo. Only acceptable when
-    you review every diff before it lands.
-
-``sandbox-exec`` (legacy, macOS)
-    Apple Seatbelt, driven by a profile Nezha generates and applies to the whole
-    ``copilot`` process tree. Superseded by ``copilot-native`` and kept only for
-    hosts whose CLI has no sandbox support.
-
-    Honest limitations:
-      * ``sandbox-exec`` is formally deprecated by Apple (still functional).
-      * The profile is ``(allow default)`` plus deny rules, i.e. a deny-list.
-        A deny-list is weaker than an allow-list: an unlisted secret store is
-        readable. Extend ``sandbox.deny_read`` for your machine.
-      * No egress control. The whole CLI is inside the sandbox and Copilot needs
-        the network to reach its API, so ``allow_network: false`` breaks the
-        agent outright.
-      * Worktrees share the parent repo's object store, so the profile must
-        grant write access to ``<repo>/.git``. A hostile agent can corrupt the
-        parent repository. Use a dedicated clone for untrusted work.
+Two backends:
 
 ``copilot-native`` (default)
     Copilot CLI's own OS-level command sandbox, via ``--sandbox``. An allow-list
     filesystem policy and a working egress switch, on macOS, Linux and Windows.
     See :class:`CopilotNativeSandbox` for what it does and does not cover.
 
-``docker``
-    Strongest of the four: separate filesystem, PID and network namespace, and
-    the only backend that confines the CLI process itself as well as the commands
-    it spawns. Requires Docker/Colima and an image with your toolchain.
+``none``
+    No process isolation. The agent runs with your full user privileges and can
+    read ``~/.ssh``, reach any host, and touch any repo. Only acceptable when
+    you review every diff before it lands.
 
-``copilot-native`` and ``sandbox-exec`` cannot be combined: Seatbelt refuses to
-nest, and a profile applied inside another one fails ``sandbox_init`` with
-``Operation not permitted``.
+Nezha used to ship two more: a hand-rolled ``sandbox-exec`` profile and a
+``docker`` wrapper. Both were removed once ``copilot-native`` landed, and the
+reasons are worth recording so they are not re-added by reflex:
+
+* ``sandbox-exec`` applied ``(allow default)`` plus deny rules -- a *deny-list*,
+  so any credential store nobody thought to list stayed readable. It also had no
+  usable egress control, because the profile wrapped the CLI itself and the CLI
+  needs the network to reach its own API. ``copilot-native`` is an allow-list and
+  sandboxes only the spawned commands, so it is strictly stronger on both counts.
+  Seatbelt also refuses to nest, so the two could never be combined anyway.
+* ``docker`` was never verified against a running daemon, and it mounted the real
+  ``~/.copilot`` -- including the ``data.db`` that holds authentication --
+  read-write into a container running as root. It promised more isolation than it
+  delivered.
 """
 
 from __future__ import annotations
@@ -47,7 +36,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_DENY_READ = [
@@ -56,7 +44,6 @@ DEFAULT_DENY_READ = [
     "~/.gnupg",
     "~/.kube",
     "~/.docker",
-    "~/.npmrc",
     "~/.netrc",
     "~/.git-credentials",
     "~/.config/gh",
@@ -111,139 +98,6 @@ class NoSandbox(Sandbox):
         return "none (NO process isolation -- agent runs with your full privileges)"
 
 
-SEATBELT_TEMPLATE = """(version 1)
-(allow default)
-
-; ---- writes: deny everything, then re-allow the workspace and runtime dirs ----
-(deny file-write*)
-(allow file-write*
-{allow_write}
-)
-
-; ---- reads: block known credential stores ----
-(deny file-read*
-{deny_read}
-)
-
-{network}
-"""
-
-
-class SeatbeltSandbox(Sandbox):
-    name = "sandbox-exec"
-
-    def preflight(self) -> None:
-        if not os.path.exists("/usr/bin/sandbox-exec"):
-            raise SandboxError(
-                "sandbox-exec not found; this backend is macOS-only. "
-                "Use sandbox.backend: docker or none."
-            )
-
-    def _git_common_dir(self, workdir: str) -> Optional[str]:
-        """A worktree's real git dir lives under the parent repo and must be writable."""
-        try:
-            proc = subprocess.run(
-                ["git", "-C", workdir, "rev-parse", "--git-common-dir"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if proc.returncode != 0:
-            return None
-        raw = proc.stdout.decode("utf-8", "replace").strip()
-        if not raw:
-            return None
-        if not os.path.isabs(raw):
-            raw = os.path.join(workdir, raw)
-        return os.path.realpath(raw)
-
-    def _profile(self, workdir: str) -> str:
-        home = os.path.expanduser("~")
-        writable = [
-            os.path.realpath(workdir),
-            os.path.realpath(tempfile.gettempdir()),
-            "/private/var/folders",
-            "/private/tmp",
-            "/dev",
-            os.path.join(home, ".copilot"),
-            os.path.join(home, ".cache"),
-            os.path.join(home, ".local/state/nezha"),
-        ] + _expand(self.allow_write)
-        git_dir = self._git_common_dir(workdir)
-        if git_dir:
-            writable.append(git_dir)
-        blocked = _expand(self.deny_read)
-        # Never deny-read a path we must write to; seatbelt file-read* denial
-        # also blocks the stat/open that precedes a write.
-        blocked = [p for p in blocked
-                   if not any(p == w or w.startswith(p + os.sep) for w in writable)]
-
-        allow_lines = "\n".join('  (subpath "%s")' % p for p in sorted(set(writable)))
-        deny_lines = "\n".join('  (subpath "%s")' % p for p in sorted(set(blocked)))
-        if not deny_lines:
-            deny_lines = '  (subpath "/nonexistent-nezha-placeholder")'
-        network = "" if self.allow_network else "(deny network*)"
-        return SEATBELT_TEMPLATE.format(
-            allow_write=allow_lines, deny_read=deny_lines, network=network)
-
-    def wrap(self, argv, workdir, env, dry_run=False):
-        self.preflight()
-        handle = tempfile.NamedTemporaryFile(
-            "w", suffix=".sb", prefix="nezha-", delete=False, encoding="utf-8")
-        try:
-            handle.write(self._profile(workdir))
-        finally:
-            handle.close()
-        wrapped = ["/usr/bin/sandbox-exec", "-f", handle.name] + list(argv)
-        return wrapped, dict(env), handle.name
-
-    def describe(self) -> str:
-        return "sandbox-exec (writes confined to workspace; %d read denials; network %s)" % (
-            len(self.deny_read), "allowed" if self.allow_network else "DENIED")
-
-
-class DockerSandbox(Sandbox):
-    """STATUS: UNVERIFIED -- Docker was not installed on the development host."""
-
-    name = "docker"
-
-    def __init__(self, config: Dict[str, Any]):
-        super(DockerSandbox, self).__init__(config)
-        self.image = config.get("image") or "nezha-agent:latest"
-        self.extra_args = list(config.get("docker_args") or [])
-        self.binary = config.get("docker_binary") or "docker"
-
-    def preflight(self) -> None:
-        if shutil.which(self.binary) is None:
-            raise SandboxError(
-                "%s not found on PATH. Install Docker or Colima, or set "
-                "sandbox.backend to sandbox-exec." % self.binary
-            )
-
-    def wrap(self, argv, workdir, env, dry_run=False):
-        self.preflight()
-        home = os.path.expanduser("~")
-        args = [
-            self.binary, "run", "--rm", "-i",
-            "--workdir", "/workspace",
-            "-v", "%s:/workspace" % os.path.realpath(workdir),
-            # Copilot session/auth state; mount read-write so sessions persist.
-            "-v", "%s:/root/.copilot" % os.path.join(home, ".copilot"),
-        ]
-        if not self.allow_network:
-            args += ["--network", "none"]
-        for key in ("GITHUB_TOKEN", "COPILOT_ALLOW_ALL", "NEZHA_ISSUE_ID",
-                    "NEZHA_ISSUE_IDENTIFIER", "NEZHA_BRANCH"):
-            if key in env:
-                args += ["-e", key]
-        args += self.extra_args
-        args += [self.image] + list(argv)
-        return args, dict(env), None
-
-    def describe(self) -> str:
-        return "docker (image=%s, network %s)" % (
-            self.image, "allowed" if self.allow_network else "none")
-
-
 #: Files and directories linked from the real ``COPILOT_HOME`` into the per-issue
 #: one. ``data.db`` carries authentication, so without it every run would need a
 #: fresh login. Verified by probing an actual run; the layout is NOT documented by
@@ -267,18 +121,17 @@ class CopilotNativeSandbox(Sandbox):
 
     Copilot CLI 1.0.85 ships OS-level command sandboxing powered by Microsoft
     eXecution Containers (MXC): Seatbelt on macOS, bubblewrap on Linux,
-    ProcessContainer on Windows. It is stronger than :class:`SeatbeltSandbox` in
-    the ways that matter most -- the filesystem policy is an *allow-list* rather
-    than a deny-list, and outbound network access is a real, enforceable switch.
+    ProcessContainer on Windows. The filesystem policy is an *allow-list*, and
+    outbound network access is a real, enforceable switch.
 
     Two properties of the official design drive this implementation:
 
     1. **Copilot CLI is not itself sandboxed**; it sandboxes each shell command
-       it spawns. That is why ``allow_network: false`` works here but breaks
-       :class:`SeatbeltSandbox`: denying egress no longer cuts the CLI off from
-       its own API. It is also the backend's main weakness -- the CLI's built-in
-       file tools bypass the OS sandbox and only honour the policy on a
-       best-effort basis, so ``copilot.allow_all_paths`` must stay ``false``.
+       it spawns. That is why ``allow_network: false`` is usable here: denying
+       egress does not cut the CLI off from its own API. It is also the backend's
+       main weakness -- the CLI's built-in file tools bypass the OS sandbox and
+       only honour the policy on a best-effort basis, so
+       ``copilot.allow_all_paths`` must stay ``false``.
 
     2. **The policy lives in ``settings.json``**, not in command-line flags. To
        avoid mutating the operator's own configuration -- and to keep the policy
@@ -290,9 +143,9 @@ class CopilotNativeSandbox(Sandbox):
     record that Copilot stores inside ``COPILOT_HOME``, so wiping it between
     attempts would silently turn every retry into a fresh conversation.
 
-    Seatbelt cannot nest: running this backend inside ``sandbox-exec`` makes
-    ``sandbox_init`` fail with ``Operation not permitted`` and *every* command
-    dies. The two backends are mutually exclusive by construction.
+    Do not wrap this backend in an outer ``sandbox-exec`` profile: Seatbelt
+    refuses to nest, ``sandbox_init`` fails with ``Operation not permitted``, and
+    *every* command dies.
     """
 
     name = "copilot-native"
@@ -310,6 +163,7 @@ class CopilotNativeSandbox(Sandbox):
         self.sandbox_mcp_servers = bool(config.get("sandbox_mcp_servers", True))
         self.sandbox_lsp_servers = bool(config.get("sandbox_lsp_servers", True))
         self.keychain_access = bool(config.get("keychain_access", False))
+        self.clear_policy_on_exit = bool(config.get("clear_policy_on_exit", True))
         self.auth_git = bool(config.get("auth_git", True))
         self.auth_gh = bool(config.get("auth_gh", False))
         self.readonly_paths = list(config.get("readonly_paths") or [])
@@ -351,8 +205,8 @@ class CopilotNativeSandbox(Sandbox):
         if proc.returncode != 0 or "Command Sandboxing" not in text:
             raise SandboxError(
                 "this copilot build does not expose command sandboxing. It is an "
-                "experimental feature; upgrade the CLI or set sandbox.backend to "
-                "sandbox-exec."
+                "experimental feature; upgrade the CLI. Setting sandbox.backend "
+                "to 'none' runs the agent with your full user privileges."
             )
         self._probed = text
         return text
@@ -471,6 +325,9 @@ class CopilotNativeSandbox(Sandbox):
                     "readwritePaths": _expand(self.allow_write),
                     "readonlyPaths": _expand(self.readonly_paths),
                     "deniedPaths": _expand(self.deny_read),
+                    # Nothing a session accumulates should survive into the next
+                    # attempt: WORKFLOW.md is the only source of this policy.
+                    "clearPolicyOnExit": self.clear_policy_on_exit,
                 },
                 "network": {
                     "allowOutbound": self.allow_network,
@@ -479,6 +336,36 @@ class CopilotNativeSandbox(Sandbox):
                 "seatbelt": {"keychainAccess": self.keychain_access},
             },
         }
+
+    #: Paths ``allowDevToolAccess`` re-grants, transcribed from
+    #: ``copilot --experimental help sandbox``. NOT exhaustive: the CLI resolves
+    #: relocated caches from the environment too, and the documented list names
+    #: only examples. It is good enough to catch a policy that contradicts
+    #: itself, which is what ``doctor`` uses it for.
+    DEV_TOOL_PATHS = (
+        "~/.npmrc", "~/.m2", "~/.cargo", "~/.gradle", "~/.nuget", "~/.bundle",
+        "~/.cache/go-build", "~/.cache/ccache", "~/.cache/sccache", "~/.cache/gh",
+    )
+
+    def dev_tool_conflicts(self) -> List[str]:
+        """``deny_read`` entries that ``allowDevToolAccess`` would grant back.
+
+        Which side wins is *unverified* -- it could not be observed without a
+        host running a real sandboxed build. That is precisely why this is worth
+        reporting: an operator should not have to guess whether the token in
+        ``~/.npmrc`` is reachable.
+        """
+        if not self.allow_dev_tool_access:
+            return []
+        granted = _expand(list(self.DEV_TOOL_PATHS))
+        conflicts = []
+        for denied in _expand(self.deny_read):
+            for grant in granted:
+                if denied == grant or denied.startswith(grant + os.sep) \
+                        or grant.startswith(denied + os.sep):
+                    conflicts.append(denied)
+                    break
+        return conflicts
 
     def home_for(self, issue_id: str) -> str:
         return os.path.join(self.state_root, "copilot-home", _slug(issue_id))
@@ -549,14 +436,7 @@ class CopilotNativeSandbox(Sandbox):
 _BACKENDS = {
     "none": NoSandbox,
     "copilot-native": CopilotNativeSandbox,
-    "sandbox-exec": SeatbeltSandbox,
-    "docker": DockerSandbox,
 }
-
-#: Backends that confine the agent by re-entering Seatbelt. Two of them cannot be
-#: stacked: ``sandbox_init`` rejects a profile applied inside another one.
-NESTING_INCOMPATIBLE = ("copilot-native", "sandbox-exec")
-
 
 def build_sandbox(config: Dict[str, Any]) -> Sandbox:
     backend = (config.get("backend") or "copilot-native").lower()

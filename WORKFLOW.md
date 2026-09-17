@@ -51,30 +51,55 @@ copilot:
   add_dir: []
   deny_tool: []
   # Values of these variables are stripped from the child env and redacted.
+  # The sandbox inherits the rest of your shell environment, so a credential
+  # that lives in a variable is NOT covered by sandbox.deny_read. Name it here.
   secret_env_vars:
     - GITHUB_TOKEN
     - JIRA_API_TOKEN
+  # A -p run has nobody to answer a question, and nobody to notice a bill.
+  no_ask_user: true
+  max_ai_credits: null
+  # Pin the binary doctor actually checked. Sandbox support and the
+  # COPILOT_HOME layout are both version-dependent.
+  no_auto_update: true
+  # AGENTS.md and .github/instructions/** are read from inside the worktree,
+  # so the agent can rewrite what its own retry obeys. Off because most repos
+  # depend on them; turn on for untrusted work.
+  no_custom_instructions: false
+  # The temp dir is granted by default and is the one writable surface two
+  # concurrent agents share.
+  disallow_temp_dir: false
+  # URL permissions scope the CLI's own fetch tools -- orthogonal to
+  # sandbox.allow_network, which scopes the commands it spawns.
+  allow_url: []
+  deny_url: []
   disable_builtin_mcps: false
   additional_mcp_config: null
   extra_args: []
 
 sandbox:
-  # copilot-native (default) | sandbox-exec (legacy, macOS) | docker | none
+  # copilot-native (default) | none
   #
   # copilot-native delegates to Copilot CLI's own OS-level command sandbox.
-  # Its filesystem policy is an allow-list, and unlike sandbox-exec it can
-  # actually deny egress: the CLI process stays outside the sandbox, so only the
-  # commands it spawns lose the network.
+  # Its filesystem policy is an allow-list, and it can actually deny egress:
+  # the CLI process stays outside the sandbox, so only the commands it spawns
+  # lose the network.
   backend: ${NEZHA_SANDBOX:-copilot-native}
-  # Outbound network for sandboxed commands. Safe to set false under
-  # copilot-native; it breaks the agent outright under sandbox-exec and docker.
+  # Outbound network for sandboxed commands (not for the CLI itself).
   allow_network: true
   allow_local_network: false
   # Unattended runs have nobody to approve a per-command escape hatch.
   # Copilot's own default is true; Nezha forces it off.
   allow_bypass: false
   # Grant the caches and registry config that builds need (npm, cargo, maven...).
+  # NOTE: this also grants read access to ~/.npmrc, ~/.m2/settings.xml and
+  # friends -- including any registry tokens they hold. Do not also list those
+  # paths under deny_read: the two settings contradict each other and which one
+  # wins is undocumented. `nezha doctor` reports the conflict.
   allow_dev_tool_access: true
+  # Reset any filesystem policy a session accumulated; WORKFLOW.md is the only
+  # source of truth for the policy.
+  clear_policy_on_exit: true
   # Run local MCP and language servers inside the sandbox too.
   sandbox_mcp_servers: true
   sandbox_lsp_servers: true
@@ -89,7 +114,6 @@ sandbox:
     - ~/.gnupg
     - ~/.kube
     - ~/.netrc
-    - ~/.npmrc
     - ~/.git-credentials
     - ~/.config/gh
     - ~/.config/gcloud
@@ -100,7 +124,6 @@ sandbox:
   # doctor checks the documented list; set this true if the check is wrong
   # for your host -- but a host that cannot sandbox fails every command.
   skip_host_prereq_check: false
-  image: nezha-agent:latest
 ---
 
 You are working on ticket `{{ issue.identifier }}` in an isolated git worktree.

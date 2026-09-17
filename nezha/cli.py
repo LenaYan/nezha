@@ -52,10 +52,16 @@ def cmd_doctor(args) -> int:
     else:
         problems.append("copilot binary %r not found on PATH" % binary)
 
+    # The policy is inspected before preflight on purpose: a policy that
+    # contradicts itself is a config bug, and an operator on a host that cannot
+    # sandbox still needs to hear about it.
+    sandbox = None
     try:
         sandbox = build_sandbox(wf.sandbox)
-        sandbox.preflight()
-        notes.append("sandbox          ok (%s)" % sandbox.describe())
+    except Exception as exc:  # noqa: BLE001
+        problems.append("sandbox: %s" % exc)
+
+    if sandbox is not None:
         if sandbox.name == "none":
             problems.append(
                 "sandbox.backend is 'none': the agent runs with your full user "
@@ -73,12 +79,38 @@ def cmd_doctor(args) -> int:
                 notes.append(
                     "sandbox.egress   open (allow_network: true). This backend can "
                     "enforce allow_network: false without breaking Copilot.")
-        if sandbox.name == "sandbox-exec":
-            notes.append(
-                "sandbox.legacy   sandbox-exec is superseded by copilot-native "
-                "(deny-list policy, no egress control, macOS only).")
-    except Exception as exc:  # noqa: BLE001
-        problems.append("sandbox: %s" % exc)
+            conflicts = sandbox.dev_tool_conflicts()
+            if conflicts:
+                problems.append(
+                    "sandbox.deny_read and sandbox.allow_dev_tool_access disagree "
+                    "about %s. allowDevToolAccess re-grants dev-tool config and "
+                    "caches -- including the registry tokens they hold -- and which "
+                    "side wins is not documented. Set allow_dev_tool_access: false "
+                    "and grant build paths explicitly via readonly_paths, or drop "
+                    "those entries from deny_read so the policy states one thing."
+                    % ", ".join(sorted(set(conflicts))))
+        try:
+            sandbox.preflight()
+            notes.append("sandbox          ok (%s)" % sandbox.describe())
+        except Exception as exc:  # noqa: BLE001
+            problems.append("sandbox: %s" % exc)
+
+    if not wf.copilot.get("no_auto_update", True):
+        problems.append(
+            "copilot.no_auto_update is false: the CLI may download and run a newer "
+            "build than the one checked above, and sandbox support plus the "
+            "COPILOT_HOME layout are both version-dependent.")
+    if wf.copilot.get("max_ai_credits") is None:
+        notes.append(
+            "copilot.budget   unbounded (max_ai_credits unset). %d attempts x %d "
+            "concurrent agents have no cost ceiling."
+            % (int(wf.agent["max_attempts"]), int(wf.agent["max_concurrent_agents"])))
+    if not wf.copilot.get("no_custom_instructions"):
+        notes.append(
+            "copilot.instr    AGENTS.md and .github/instructions/** are read from "
+            "inside the worktree, so the agent can edit what its own retry obeys. "
+            "Set copilot.no_custom_instructions: true if that matters more than "
+            "the repo's own guidance.")
 
     wm = WorkspaceManager(wf.workspace)
     try:
@@ -152,18 +184,13 @@ def cmd_plan(args) -> int:
     argv = runner.build_argv("<PROMPT>", resume_session=args.resume)
     wm = WorkspaceManager(wf.workspace)
     workdir = wm.path_for(args.issue or "EXAMPLE-1")
-    wrapped, run_env, profile = sandbox.wrap(argv, workdir, dict(os.environ), dry_run=True)
+    wrapped, run_env, _ = sandbox.wrap(argv, workdir, dict(os.environ), dry_run=True)
     print("workdir: %s" % workdir)
     print("sandbox: %s" % sandbox.describe())
     if hasattr(sandbox, "policy"):
         print("\n--- effective sandbox policy (settings.json) ---")
         print(json.dumps({"sandbox": sandbox.policy()}, indent=2, sort_keys=True))
         print("\nCOPILOT_HOME: %s" % run_env.get("COPILOT_HOME"))
-    if profile and os.path.exists(profile):
-        print("\n--- seatbelt profile ---")
-        with open(profile, "r", encoding="utf-8") as handle:
-            print(handle.read())
-        os.unlink(profile)
     print("--- argv ---")
     for part in wrapped:
         print("  %s" % part)
