@@ -20,7 +20,7 @@ def test_parse_minimal_applies_defaults():
     wf = Workflow.parse(MINIMAL)
     assert wf.tracker["kind"] == "file"
     assert wf.agent["max_concurrent_agents"] == 2
-    assert wf.sandbox["backend"] == "sandbox-exec"
+    assert wf.sandbox["backend"] == "copilot-native"
     assert wf.poll_interval_sec == 15.0
     assert "Do {{ issue.identifier }} now." in wf.prompt_template
 

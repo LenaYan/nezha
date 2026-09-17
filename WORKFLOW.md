@@ -59,10 +59,30 @@ copilot:
   extra_args: []
 
 sandbox:
-  # sandbox-exec (macOS Seatbelt) | docker | none
-  backend: ${NEZHA_SANDBOX:-sandbox-exec}
-  # Copilot needs network to reach the API; false will break the agent.
+  # copilot-native (default) | sandbox-exec (legacy, macOS) | docker | none
+  #
+  # copilot-native delegates to Copilot CLI's own OS-level command sandbox.
+  # Its filesystem policy is an allow-list, and unlike sandbox-exec it can
+  # actually deny egress: the CLI process stays outside the sandbox, so only the
+  # commands it spawns lose the network.
+  backend: ${NEZHA_SANDBOX:-copilot-native}
+  # Outbound network for sandboxed commands. Safe to set false under
+  # copilot-native; it breaks the agent outright under sandbox-exec and docker.
   allow_network: true
+  allow_local_network: false
+  # Unattended runs have nobody to approve a per-command escape hatch.
+  # Copilot's own default is true; Nezha forces it off.
+  allow_bypass: false
+  # Grant the caches and registry config that builds need (npm, cargo, maven...).
+  allow_dev_tool_access: true
+  # Run local MCP and language servers inside the sandbox too.
+  sandbox_mcp_servers: true
+  sandbox_lsp_servers: true
+  # macOS: keep the login keychain out of the sandbox.
+  keychain_access: false
+  # git credentials are needed to commit; gh is not, by default.
+  auth_git: true
+  auth_gh: false
   deny_read:
     - ~/.ssh
     - ~/.aws
@@ -75,6 +95,7 @@ sandbox:
     - ~/.config/gcloud
     - ~/Library/Keychains
   allow_write: []
+  readonly_paths: []
   image: nezha-agent:latest
 ---
 

@@ -60,6 +60,19 @@ def cmd_doctor(args) -> int:
             problems.append(
                 "sandbox.backend is 'none': the agent runs with your full user "
                 "privileges. Acceptable only if you review every diff.")
+        if sandbox.name == "copilot-native":
+            if sandbox.allow_bypass:
+                problems.append(
+                    "sandbox.allow_bypass is true: a sandboxed command can opt out "
+                    "of the sandbox, and an unattended run has nobody to refuse it.")
+            if sandbox.allow_network:
+                notes.append(
+                    "sandbox.egress   open (allow_network: true). This backend can "
+                    "enforce allow_network: false without breaking Copilot.")
+        if sandbox.name == "sandbox-exec":
+            notes.append(
+                "sandbox.legacy   sandbox-exec is superseded by copilot-native "
+                "(deny-list policy, no egress control, macOS only).")
     except Exception as exc:  # noqa: BLE001
         problems.append("sandbox: %s" % exc)
 
@@ -135,9 +148,13 @@ def cmd_plan(args) -> int:
     argv = runner.build_argv("<PROMPT>", resume_session=args.resume)
     wm = WorkspaceManager(wf.workspace)
     workdir = wm.path_for(args.issue or "EXAMPLE-1")
-    wrapped, _, profile = sandbox.wrap(argv, workdir, dict(os.environ))
+    wrapped, run_env, profile = sandbox.wrap(argv, workdir, dict(os.environ), dry_run=True)
     print("workdir: %s" % workdir)
     print("sandbox: %s" % sandbox.describe())
+    if hasattr(sandbox, "policy"):
+        print("\n--- effective sandbox policy (settings.json) ---")
+        print(json.dumps({"sandbox": sandbox.policy()}, indent=2, sort_keys=True))
+        print("\nCOPILOT_HOME: %s" % run_env.get("COPILOT_HOME"))
     if profile and os.path.exists(profile):
         print("\n--- seatbelt profile ---")
         with open(profile, "r", encoding="utf-8") as handle:
@@ -173,6 +190,11 @@ def cmd_rm(args) -> int:
     wm.hooks = wf.hooks
     ws = wm.describe(args.issue, args.issue)
     wm.remove(ws)
+    # The per-issue COPILOT_HOME lives beside run state, not in the worktree,
+    # so removing the workspace would otherwise leave it behind.
+    sandbox = build_sandbox(wf.sandbox)
+    if hasattr(sandbox, "cleanup_home"):
+        sandbox.cleanup_home(ws.issue_id)
     return 0
 
 

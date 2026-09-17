@@ -148,8 +148,12 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
                 "deny_tool": [], "available_tools": [], "secret_env_vars": [],
                 "additional_mcp_config": None, "disable_builtin_mcps": False,
                 "max_autopilot_continues": None, "extra_args": []},
-    "sandbox": {"backend": "sandbox-exec", "allow_network": True, "deny_read": [],
-                "allow_write": [], "image": "nezha-agent:latest", "docker_args": []},
+    "sandbox": {"backend": "copilot-native", "allow_network": True, "deny_read": [],
+                "allow_write": [], "readonly_paths": [], "image": "nezha-agent:latest",
+                "docker_args": [], "allow_local_network": False, "allow_bypass": False,
+                "allow_dev_tool_access": True, "sandbox_mcp_servers": True,
+                "sandbox_lsp_servers": True, "keychain_access": False,
+                "auth_git": True, "auth_gh": False, "copilot_home_links": []},
 }
 
 _REQUIRED_STATE_KEYS = ("active_states", "terminal_states")
@@ -190,7 +194,16 @@ class Workflow(object):
 
     @property
     def sandbox(self) -> Dict[str, Any]:
-        return self.config["sandbox"]
+        """Sandbox config, with the two values the backends need from elsewhere.
+
+        ``copilot-native`` stores its per-issue ``COPILOT_HOME`` under the same
+        state root as run state, and probes the same binary the runner invokes.
+        Injecting them here keeps WORKFLOW.md from having to repeat either.
+        """
+        merged = dict(self.config["sandbox"])
+        merged.setdefault("state_root", self.workspace.get("state_root"))
+        merged.setdefault("copilot_binary", self.copilot.get("binary"))
+        return merged
 
     @property
     def poll_interval_sec(self) -> float:
@@ -265,10 +278,17 @@ class Workflow(object):
         if float(self.polling["interval_ms"]) <= 0:
             raise WorkflowError("%s: polling.interval_ms must be > 0" % src)
         backend = self.sandbox["backend"]
-        if backend not in ("sandbox-exec", "docker", "none"):
+        if backend not in ("copilot-native", "sandbox-exec", "docker", "none"):
             raise WorkflowError(
-                "%s: sandbox.backend must be one of sandbox-exec|docker|none, got %r"
-                % (src, backend)
+                "%s: sandbox.backend must be one of "
+                "copilot-native|sandbox-exec|docker|none, got %r" % (src, backend)
+            )
+        if backend != "copilot-native" and not self.sandbox.get("allow_network", True):
+            raise WorkflowError(
+                "%s: sandbox.allow_network: false is only supported by the "
+                "copilot-native backend. Under %r the whole CLI sits inside the "
+                "sandbox, so denying egress also cuts Copilot off from its own "
+                "API and every run fails." % (src, backend)
             )
         if not self.prompt_template.strip():
             raise WorkflowError("%s: prompt body is empty" % src)
